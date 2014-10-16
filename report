@@ -1,0 +1,75 @@
+#Victor Ranu
+#ranuv@onid.oregonstate.edu
+#CS344-400
+#Homework#6
+
+import subprocess
+import shlex
+import os
+import sys
+import stat #for exit
+import socket #for sockets
+import argparse
+
+
+
+parser = argparse.ArgumentParser(description='Look for k flag')
+parser.add_argument('-k', nargs='?', const = 'YES', default = 'NO')
+args = parser.parse_args()
+
+port = 8888 # Arbitrary non-privileged port
+
+#creating a socket
+try:
+    #create an AF_INET, STREAM socket (TCP)
+    s = socket.socket(socket.AF_INET ,socket.SOCK_STREAM)
+#socket.socket creates a socket and returns a socket descriptor which can be used in other related functions
+except socket.error, msg:
+    print 'Failed to create socket. Error code ' + str(msg[0]) + ' , Error message : ' + msg[1]
+    sys.exit();
+
+#print 'Socket Created'
+
+#Connect to a server
+#first get the ip address of remote host/url
+#host = 'www.google.com'
+host = 'localhost'
+
+try:
+    remote_ip = socket.gethostbyname( host )
+
+except socket.gaierror:
+    #could not resolve
+    print 'Hostname could not be resolved. Exiting'
+    sys.exit()
+
+#print 'Ip address of ' + host + ' is ' + remote_ip
+
+#Connect to remote server
+s.connect((remote_ip , port))
+
+#print 'Socket Connected to ' + host + ' on ip ' + remote_ip
+
+#Send some data to remote server
+if(args.k == 'YES'):
+    message = "KILL"
+else:
+    message = "REPORTBACK"
+
+
+try :
+    #Set the whole string
+    s.sendall(message)
+except socket.error:
+    #Send failed
+    print 'Send failed'
+    sys.exit()
+
+#print 'REPORT: Message send successfully'
+
+#Now receive data
+reply = s.recv(4096)
+
+print reply
+
+s.close()
