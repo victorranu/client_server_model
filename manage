@@ -1,0 +1,242 @@
+
+import subprocess
+import shlex
+import os
+import sys
+import stat
+import time
+import argparse
+import stat #for exit
+import socket #for sockets
+import threading
+import signal
+#import Queue
+from multiprocessing import Process, Queue
+
+#GLOBAL VARIABLES
+message = 'xx'
+runningProcs = []   # Keep running computes for REPORT BACK
+perfectNums = []    # stor perfect numbers for REPORT BACK
+numTested = 0       # largest "min" tested for REPORT BACK
+maxNumTested = 0
+#queues
+#minQue    # for min
+#maxQue    # for max
+
+
+class ExitCommand(Exception):
+    pass
+
+def printNums():        #not called unless in first thread
+    global message
+    j = 1
+    while True:
+        j=j+1
+        print j
+        message = 'message is'+`j`
+        time.sleep(5)
+
+#run as a seoarate thread in parent process
+def DistributionLoop(minQue, maxQue):
+    global numTested
+    min = 1;    # initialize
+    while True: # go to 2 billion maximum
+        #print 'Manage: about to put min into queue: ', min
+        minQue.put(min)     # Add, will be taken by handleCompute
+        #print 'Manage: waiting for max queue, current min:', min
+        min = maxQue.get()     # Waits for some Compute to write max
+        numTested = min
+        #print 'Manage: got max, new min: ', min
+
+def recvINTRFromCompute (min,maxQue, conn, addr):
+    maxQue.put(min)    #compute closed, send min back.
+    sys.exit()
+
+# fills up perfectNumQue (Called in handleCompute)
+#def extractPerfectNums(perfectNumbers, perfectNumQue, procName):
+#    lines = perfectNumbers.split('\n')
+#    print "Why?",  procName, "\n", perfectNumbers
+#    for line in lines:
+#        if '<perfectNumber>' in line:
+#            number = filter(str.isdigit, line)
+#            perfectNumQue.put(number)
+
+
+def compileReportBack(perfectNumQue, deadProcQue):
+    global runningProcs
+    global perfectNums
+    global numTested
+    global maxNumTested
+    msg = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n<return>\n"
+    #first get from array, as a result of previous REPORT BACK CALLS
+    for num in perfectNums:
+        msg = msg + '\t<perfectNumber> ' +  num + ' </perfectNumber>\n'
+    
+    while not perfectNumQue.empty():
+        num = perfectNumQue.get()
+        if num == '0':
+            perfectNumQue.get()
+            perfectNumQue.get()
+            perfectNumQue.get()
+            perfectNumQue.get()
+            break
+        msg = msg + '\t<perfectNumber> ' +  num + ' </perfectNumber>\n'
+        #Que.get deletes from Queue, so add it to global perfectNums
+        perfectNums.append(num)
+
+    #delete dead processes
+    while not deadProcQue.empty():
+       xx = deadProcQue.get()
+       runningProcs.remove(xx)
+    
+    for xx in runningProcs:
+        msg = msg + '\t<procs> ' + xx + ' </procs>\n'
+
+    if maxNumTested < numTested:
+        maxNumTested = numTested
+    msg = msg + '\t<NumberTested> ' +  str(maxNumTested) + ' </NumberTested>\n'
+    msg = msg + '\n</return>\n'
+    return msg
+
+
+
+# One process per compute call-in
+def handleCompute(string_iAmHere, minQue, maxQue, perfectNumQue, deadProcQue, conn, addr):
+    calling, hostname, pid, xx = string_iAmHere.split(" ") # extract using str.split. xx is just to gather \n at the end
+    procName = hostname + "(" + pid + ")"
+    #for x, y in runningProcs:;   print x, y
+    cntLoop = 0
+    x = 0
+    while True:
+        #print 'Manage answered for ' + pid + ', waiting for minQue'
+        min = minQue.get()    # waits if empty, filled by distributionLoop
+        #print "PID:", pid, 'got from minQue Min:',  min, ', getting max'
+        minStr = str(min) + '\n'
+        start = time.time()
+        try:
+            conn.sendall(minStr)      # send min to Compute
+        except:
+            #assume compute has died
+            #print "COMPUTE DIED at sendall min=", min, procName
+            maxQue.put(min)    #compute closed, send min back.
+            deadProcQue.put(procName)
+            sys.exit()
+
+        try:
+            max = conn.recv(1024)  # get max, doable in ~15 seconds
+        except:
+            #assume compute has died
+            #print "COMPUTE DIED at conn.recv min=", min, procName
+            maxQue.put(min)    #compute closed, send min back.
+            deadProcQue.put(procName)
+            sys.exit()
+        #print "PID:", pid, ' got max: ', max
+        
+
+        #time.sleep(5)   # emulating compute for 15 seconds
+        
+        perfectNumXML = "       "
+        try:
+            perfectNumXML = conn.recv(4096)  # after ~15sec, recv this
+        
+        except:
+            #assume compute has died
+            #print "COMPUTE DIED at conn.recv perfectNum", min, procName
+            maxQue.put(min)    #compute closed, send min back.
+            deadProcQue.put(procName)
+            sys.exit()
+
+        #print "Why?",  procName, "\n", perfectNumXML
+        #extractPerfectNums(perfectNumXML, perfectNumQue, procName)
+        lines = perfectNumXML.split('\n')
+        for line in lines:
+            if '<perfectNumber>' in line:
+                number = filter(str.isdigit, line)
+                perfectNumQue.put(number)
+        perfectNumXML = "       "
+        numTested = max     #once moved into queue, then officially tested
+       
+        maxQue.put(max)    # distribute loop is waiting for "max"
+        #print pid + ' Added max to Queue: ', max
+
+        #  collectPerfectNums()    #would take ~15 seconds of computation
+        cntLoop = cntLoop + 1
+        end = time.time()
+        #print "Done in PID= ", pid, "loopCnt:", cntLoop, " min=", min, " max=", max, "ExecutionTime=", end - start, "Host:", hostname
+        x = x + 1
+    
+    conn.sendall('KILL\n')
+
+
+
+HOST = ''   # Symbolic name meaning all available interfaces
+PORT = 8888# Arbitrary non-privileged port
+
+minQue = Queue()
+maxQue = Queue()
+perfectNumQue = Queue()
+deadProcQue = Queue()
+
+t = threading.Thread(target=DistributionLoop, args=(minQue, maxQue))
+t.daemon = True
+t.start()
+
+#open a socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#print 'Socket created'
+s.close()
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+#bind a socket
+try:
+    s.bind((HOST, PORT))
+except socket.error , msg:
+    print 'Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1]
+    sys.exit()
+
+#print 'Socket bind complete'
+
+while True:
+    s.listen(10)
+    #print 'Socket now listening'
+    #wait to accept a connection - blocking call
+    conn, addr = s.accept()
+    #display client information
+    #print 'Connected with ' + addr[0] + ':' + str(addr[1])
+    data = conn.recv(1024)
+    if('KILL' in data):
+        #conn.sendall('KILLING....\n')
+        conn.close()
+        s.close()
+        sys.exit(0)
+        #raise ExitCommand()
+    elif('REPORTBACK' in data):
+        msg2 = 'vic was here\n'
+        #print compileReportBack(perfectNumQue)
+        #msg2 =message + '</return>\n'
+        conn.sendall(compileReportBack(perfectNumQue, deadProcQue))
+    elif ('CALLING' in data):
+        calling, hostname, pid, xx = data.split(" ") # extract
+        #print "host:", hostname, " PID:", pid, "data:", data
+        xx = hostname + "(" + pid + ")"
+        runningProcs.append(xx) # store for REPORT BACK
+
+        p = Process(target=handleCompute, args=(data, minQue, maxQue, perfectNumQue, deadProcQue, conn, addr))
+        p.daemon = True
+        p.start()
+    else:
+        print 'ERROR: invalid statements, data', data
+        msg2 = 'reached error message\n'
+        conn.sendall(msg2)
+                #except:
+# pass
+
+#p.join() # this blocks until the process terminates
+
+
+
+conn.close()
+s.close()
+sys.exit()
+
+
