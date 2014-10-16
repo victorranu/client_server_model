@@ -1,0 +1,335 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <getopt.h>
+#include <sys/utsname.h>
+#include <sys/stat.h>
+#include <strings.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/time.h>
+#include <math.h>
+#include <stdbool.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <errno.h>      /* Declares errno and defines error constants */
+
+
+#define PORT_NUM "8888"        /* Port number for server */
+
+#define INT_LEN 4096              /* Size of string able to hold largest
+                                xmlData (including terminating '\n') */
+/*GLOBAL VARIABLES*/
+bool V = false;
+int INT_MAX = 34000000;
+int CFD;
+
+static void sigHandlerSIGINT (int sig){
+    //printf("SIGINT has been caught, terminating the program, about to die\n");
+    close(CFD); // CFD assigned in compute
+    exit(0);
+}
+
+ssize_t readLine(int fd, void *buffer, size_t n);
+ssize_t readLine(int fd, void *buffer, size_t n)
+{
+    ssize_t numRead;                    /* # of bytes fetched by last read() */
+    size_t totRead;                     /* Total bytes read so far */
+    char *buf;
+    char ch;
+    
+    if (n <= 0 || buffer == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    buf = buffer;                       /* No pointer arithmetic on "void *" */
+    
+    totRead = 0;
+    for (;;) {
+        numRead = read(fd, &ch, 1);
+        
+        if (numRead == -1) {
+            if (errno == EINTR)         /* Interrupted --> restart read() */
+                continue;
+            else
+                return -1;              /* Some other error */
+            
+        } else if (numRead == 0) {      /* EOF */
+            if (totRead == 0)           /* No bytes read; return 0 */
+                return 0;
+            else                        /* Some bytes read; add '\0' */
+                break;
+            
+        } else {                        /* 'numRead' must be 1 if we get here */
+            if (totRead < n - 1) {      /* Discard > (n - 1) bytes */
+                totRead++;
+                *buf++ = ch;
+            }
+            
+            if (ch == '\n')
+                break;
+        }
+    }
+    
+    *buf = '\0';
+    return totRead;
+}
+
+//reference: http://stackoverflow.com/questions/1468596/calculating-elapsed-time-in-a-c-program-in-milliseconds
+/* Return 1 if the difference is negative, otherwise 0.  */
+int timeval_subtract(struct timeval *result, struct timeval *t2, struct timeval *t1)
+{
+    long int diff = (t2->tv_usec + 1000000 * t2->tv_sec) - (t1->tv_usec + 1000000 * t1->tv_sec);
+    result->tv_sec = diff / 1000000;
+    result->tv_usec = diff % 1000000;
+    
+    return (diff<0);
+}
+
+long int timing(int);
+long int timing(int min){
+    volatile int max;
+    volatile int saved;
+    volatile int n, i, sum;
+    int temp = 0;
+    struct timeval tvBegin, tvEnd, tvDiff;
+    
+    if (min < 100000)
+        {max = min+1000;temp = 40000;}
+    else if (min < 400000)  max = min+1000;
+    else                    max = min+100;
+    //begin
+    gettimeofday(&tvBegin, NULL);
+    
+    for (n=(min+temp); n<=(max+temp); n++) {
+        i = 1;
+        sum = 0;
+        while(i<n){
+            if(n%i==0)
+                sum=sum+i;
+            i++;
+        }
+        if (sum == n) {
+            saved = sum;
+        }
+    }
+    
+    //end
+    gettimeofday(&tvEnd, NULL);
+    
+    timeval_subtract(&tvDiff, &tvEnd, &tvBegin);
+    //printf("TIMING: %ld.%06ld\n", tvDiff.tv_sec, tvDiff.tv_usec );
+    double tots = tvDiff.tv_sec*1000000 + tvDiff.tv_usec;
+    //printf("tots: %f\n", tots);
+    tots = tots / 1000000;
+    //printf("totsdividedbymilli: %f\n", tots);
+    long int totalcomputations = ((15-tots)/tots) * (max-min);
+    //printf("total: %ld\n", total);
+    //printf("min: %d totalcomputations: %ld max = %d\n", min, totalcomputations, totalcomputations+min);
+    
+    return ((int)totalcomputations+min);
+    /*
+     long int temp = tvDiff.tv_sec * 1000000 + tvDiff.tv_usec;
+     float temp2 = temp/1000000;
+     printf("temp: %f\n", temp2);
+     float total = (15/temp) * max;
+     printf("total: %f\n", total);*/
+    
+    
+}
+
+void compute(int, int, int);
+void compute(int min, int max, int cfd){
+    int n, i, sum;
+    char xmlData[INT_LEN];
+    ssize_t numRead;
+    
+    CFD = cfd; // CFD is global for closing this in INTR
+    
+    
+    
+    /* print header of XML */
+    sprintf(xmlData, "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n<return>\n");
+    
+    
+    
+    for (n=min; n<=max; n++) {
+        i = 1;
+        sum = 0;
+        while(i<n){
+            if(n%i==0)
+                sum=sum+i;
+            i++;
+        }
+        if (sum == n) {
+            sprintf(xmlData, "%s\t<perfectNumber>%d</perfectNumber>\n", xmlData, sum);
+        }
+    }
+    
+    sprintf(xmlData, "%s\n</return>\n", xmlData);
+    
+    // now xmlData is ready to be sent to manage.py
+    if (write(cfd, xmlData , strlen(xmlData)) !=  strlen(xmlData)){
+        //printf("Partial/failed write (reqLenStr)");
+        exit(EXIT_SUCCESS); // means server/manage exited or killed
+    }
+}
+
+
+
+void computeToManageSocket(char *);
+void computeToManageSocket(char *manageHost){
+    char reqLenStr[INT_LEN];
+    //char *reqLenStr;                    /* Requested length of sequence */
+    //char seqNumStr[INT_LEN];            /* Start of granted sequence */
+    int cfd, max, min; //cfd is file descriptor for socket connection
+    ssize_t numRead;
+    struct addrinfo hints;
+    struct addrinfo *result, *rp;
+    char hostname[1024];
+    char myHostname[1024];
+
+    
+    myHostname[1023] = '\0';
+    gethostname(myHostname, 1023);
+    
+    hostname[1023] = '\0';
+    if (strcmp(manageHost,"xx") == 0) {
+        gethostname(hostname, 1023);
+    } else {
+        strcpy(hostname,manageHost);
+    }
+    //printf ("hostname %s\n", hostname); return;
+
+    //if (argc < 2 || strcmp(argv[1], "--help") == 0)
+        //usageErr("%s server-host [sequence-len]\n", argv[0]);
+    
+    /* Call getaddrinfo() to obtain a list of addresses that
+     we can try connecting to */
+    
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_canonname = NULL;
+    hints.ai_addr = NULL;
+    hints.ai_next = NULL;
+    hints.ai_family = AF_UNSPEC;                /* Allows IPv4 or IPv6 */
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_NUMERICSERV;
+    
+    if (getaddrinfo(hostname, PORT_NUM, &hints, &result) != 0){
+        printf("Could not getaddrinfo for hostname: %s\n", hostname);
+        exit(EXIT_FAILURE);
+    }
+    
+    /* Walk through returned list until we find an address structure
+     that can be used to successfully connect a socket */
+    
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        cfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (cfd == -1)
+            continue;                           /* On error, try next address */
+        
+        if (connect(cfd, rp->ai_addr, rp->ai_addrlen) != -1)
+            break;                              /* Success */
+        
+        /* Connect failed: close this socket and try next address */
+        
+        close(cfd);
+    }
+    if (rp == NULL){
+        printf("Could not connect socket to any address on %s", hostname);
+        exit(EXIT_FAILURE);
+    }
+
+    freeaddrinfo(result);
+    
+    /* Send requested sequence length, with terminating newline */
+    //reqLenStr = (argc > 2) ? argv[2] : "1";
+    
+    sprintf(reqLenStr, "CALLING %s %d ", myHostname, getpid());
+    if (write(cfd, reqLenStr, strlen(reqLenStr)) !=  strlen(reqLenStr)){
+        printf("Partial/failed write (reqLenStr)");
+        exit(EXIT_FAILURE);
+    }
+//    if (write(cfd, "\n", 1) != 1){
+//        printf("Partial/failed write (newline)");
+//        exit(EXIT_FAILURE);
+//    }
+    
+    /* Read and display sequence number returned by server */
+    while (true) {
+        //read min OR 'KILL' sent by server (manage.py)
+        numRead = readLine(cfd, reqLenStr, INT_LEN);
+        if (numRead == -1)
+            printf("readLine");
+        if (numRead == 0){
+            //printf("Unexpected EOF from server");
+            exit(EXIT_SUCCESS);// means server/manage exited or killed
+        }
+        //printf("Recieved from manage: %s", reqLenStr);   /* Includes '\n' */
+        
+        if (strcmp(reqLenStr, "KILL\n") == 0) {
+            printf("in kill if statement\n");
+            break;  //go to exit success
+        }
+        
+        min = atoi(reqLenStr);
+        max = timing(min);
+        
+        //printf("min: %s max: %d\n", reqLenStr, max );
+        
+        //write max to server (manage.py)
+        sprintf(reqLenStr, "%d", max);
+        if (write(cfd, reqLenStr, strlen(reqLenStr)) !=  strlen(reqLenStr)){
+            //printf("Partial/failed write (reqLenStr)");
+            exit(EXIT_SUCCESS);// means server/manage exited or killed
+        }
+//        if (write(cfd, "\n", 1) != 1){
+//            printf("Partial/failed write (newline)");
+//            exit(EXIT_FAILURE);
+//        }
+
+        // call compute to find perfectNum between MIN & MAX
+        compute(min, max, cfd); //also sends back perfectNum XML data
+    }
+    
+    
+    
+    exit(EXIT_SUCCESS);                         /* Closes 'cfd' */
+    
+    
+    
+}
+
+int main(int argc, char *argv[]){
+    char *hostname = "xx";
+    char c;
+    
+    
+    while((c = getopt(argc, argv, "h:v" )) !=-1) {
+        switch (c) {
+            case 'v':
+                V = true;
+                break;
+            case 'h':
+                hostname = optarg;
+                break;
+            default:
+                printf("Usage: Compute [-h hostname]\n Where hostname is the name of the host on which manage.py is running.\n");
+                return 1;
+        }
+    }
+    //install signal handlers
+    if(signal(SIGINT, sigHandlerSIGINT) == SIG_ERR)
+        exit(0);
+    
+    computeToManageSocket(hostname);
+    //compute();
+
+    return 0;
+}
